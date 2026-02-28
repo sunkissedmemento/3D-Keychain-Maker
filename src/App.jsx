@@ -22,12 +22,18 @@ const DEFAULTS = {
 };
 
 const FONT_URLS = {
-  "Pacifico:style=Regular": "/fonts/Pacifico-Regular.ttf",
-  "Lobster:style=Regular": "/fonts/Lobster-Regular.ttf",
-  "Titan One:style=Regular": "/fonts/TitanOne-Regular.ttf",
-  "Luckiest Guy:style=Regular": "/fonts/LuckiestGuy-Regular.ttf",
-  "Bhineka:style=Regular": "/fonts/Bhineka-Regular.ttf",
-  "Pheonies:style=Regular": "/fonts/Pheonies.otf",
+  "Pacifico:style=Regular":    "/fonts/Pacifico-Regular.ttf",
+  "Lobster:style=Regular":     "/fonts/Lobster-Regular.ttf",
+  "Titan One:style=Regular":   "/fonts/TitanOne-Regular.ttf",
+  "Luckiest Guy:style=Regular":"/fonts/LuckiestGuy-Regular.ttf",
+  "Bhineka:style=Regular":     "/fonts/Bhineka-Regular.ttf",
+  "Pheonies:style=Regular":    "/fonts/Pheonies.otf",
+  // New fonts
+  "Freedom:style=Regular":     "/fonts/Freedom-10eM.ttf",
+  "Short Baby:style=Regular":  "/fonts/ShortBaby-Mg2w.ttf",
+  "Cabal Bold:style=Regular":  "/fonts/CabalBold-78yP.ttf",
+  "Pixel Letters:style=Regular":"/fonts/Pixellettersfull-BnJ5.ttf",
+  "Hearty Geelyn:style=Regular":"/fonts/HeartyGeelynEditsAirbrush-ze23.ttf",
 };
 
 const STORAGE_KEY = "keychain_colors_v1";
@@ -64,7 +70,7 @@ const DARK = {
   blob1: "#f472b612", blob2: "#c084fc12",
 };
 
-// ── Clipper helpers ──────────────────────────────────────────────────────────
+// ── Clipper helpers ────────────────────────────────────────────────────────────
 const SCALE = 1000;
 const toCP = p => p.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
 const fromCP = p => p.map(v => [v.X / SCALE, v.Y / SCALE]);
@@ -81,37 +87,20 @@ function offsetUnion(paths, delta) {
   return sol.map(fromCP);
 }
 
-// ── Geometry helpers ─────────────────────────────────────────────────────────
+// ── Geometry helpers ───────────────────────────────────────────────────────────
 
-// SVG/font coords have Y pointing DOWN. THREE.ExtrudeGeometry expects Y pointing UP.
-// Instead of scaling after extrusion (which breaks winding), we negate Y in the
-// shape points BEFORE extrusion. This keeps winding correct from the start.
-function svgShapesToThreeShapes(svgPaths) {
-  const shapes = [];
-  for (const path of svgPaths) {
-    // toShapes(true) = isCCW hint for SVG
-    const pathShapes = path.toShapes(true);
-    for (const shape of pathShapes) {
-      // Negate Y on all points in the outer contour
-      for (const pt of shape.getPoints()) {
-        pt.y = -pt.y;
-      }
-      // Rebuild shape with negated Y
-      const pts = shape.getPoints().map(p => new THREE.Vector2(p.x, -p.y));
-      const newShape = new THREE.Shape(pts);
-      // Also negate holes
-      for (const hole of shape.holes) {
-        const holePts = hole.getPoints().map(p => new THREE.Vector2(p.x, -p.y));
-        newShape.holes.push(new THREE.Path(holePts));
-      }
-      shapes.push(newShape);
-    }
+// Signed area of a polygon defined by THREE.Vector2 array (positive = CCW in Y-up space)
+function signedAreaVec2(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    a += pts[i].x * pts[j].y;
+    a -= pts[j].x * pts[i].y;
   }
-  return shapes;
+  return a / 2;
 }
 
-// Rebuild shapes from flat 2D contours (for the border/base offset path).
-// Clipper returns polys in screen coords (Y-down), so we negate Y here too.
+// Signed area of raw [x,y] polygon (screen/clipper space, Y-down)
 function signedArea(poly) {
   let a = 0;
   for (let i = 0; i < poly.length; i++) {
@@ -122,24 +111,143 @@ function signedArea(poly) {
   return a / 2;
 }
 
-// Convert clipper output polygons to THREE.Shape.
-// Clipper normlises winding: positive area = outer, negative = hole.
-// We negate Y (screen→3D) which also flips winding, so we re-check after.
+// Point-in-polygon test (ray casting) for THREE.Vector2 points
+function pointInPolygon(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    if (((yi > pt.y) !== (yj > pt.y)) && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Convert opentype.js path commands directly to THREE.Shape contours.
+// This bypasses SVGLoader.toShapes() which mishandles OTF/CFF winding.
+// Returns array of { pts: Vector2[], area: number } contours.
+function opentypePathToContours(otPath, yFlip = true) {
+  const contours = [];
+  let current = null;
+  const flip = yFlip ? -1 : 1;
+
+  for (const cmd of otPath.commands) {
+    if (cmd.type === "M") {
+      if (current && current.length >= 3) contours.push(current);
+      current = [new THREE.Vector2(cmd.x, flip * cmd.y)];
+    } else if (cmd.type === "L") {
+      current?.push(new THREE.Vector2(cmd.x, flip * cmd.y));
+    } else if (cmd.type === "C") {
+      // Cubic bezier — sample it
+      if (current) {
+        const p0 = current[current.length - 1];
+        const p1 = new THREE.Vector2(cmd.x1, flip * cmd.y1);
+        const p2 = new THREE.Vector2(cmd.x2, flip * cmd.y2);
+        const p3 = new THREE.Vector2(cmd.x,  flip * cmd.y);
+        const segs = 12;
+        for (let s = 1; s <= segs; s++) {
+          const t = s / segs;
+          const mt = 1 - t;
+          current.push(new THREE.Vector2(
+            mt*mt*mt*p0.x + 3*mt*mt*t*p1.x + 3*mt*t*t*p2.x + t*t*t*p3.x,
+            mt*mt*mt*p0.y + 3*mt*mt*t*p1.y + 3*mt*t*t*p2.y + t*t*t*p3.y
+          ));
+        }
+      }
+    } else if (cmd.type === "Q") {
+      // Quadratic bezier — sample it
+      if (current) {
+        const p0 = current[current.length - 1];
+        const p1 = new THREE.Vector2(cmd.x1, flip * cmd.y1);
+        const p2 = new THREE.Vector2(cmd.x,  flip * cmd.y);
+        const segs = 10;
+        for (let s = 1; s <= segs; s++) {
+          const t = s / segs;
+          const mt = 1 - t;
+          current.push(new THREE.Vector2(
+            mt*mt*p0.x + 2*mt*t*p1.x + t*t*p2.x,
+            mt*mt*p0.y + 2*mt*t*p1.y + t*t*p2.y
+          ));
+        }
+      }
+    } else if (cmd.type === "Z") {
+      if (current && current.length >= 3) {
+        contours.push(current);
+        current = null;
+      }
+    }
+  }
+  if (current && current.length >= 3) contours.push(current);
+  return contours;
+}
+
+// Build THREE.Shape array from opentype.js path, correctly handling
+// OTF/CFF fonts where winding order cannot be trusted.
+// Strategy: classify contours by signed area (positive area in Y-up = CCW = outer),
+// then attach holes to their containing outer using point-in-polygon.
+function opentypePathToThreeShapes(otPath) {
+  const contours = opentypePathToContours(otPath, true); // Y-flipped for THREE
+
+  // Classify by signed area in Y-up 3D space
+  const outers = [];
+  const holes  = [];
+  for (const pts of contours) {
+    const area = signedAreaVec2(pts);
+    if (area > 0) outers.push(pts);  // CCW in Y-up = outer face
+    else          holes.push(pts);   // CW in Y-up = hole
+  }
+
+  // If all contours have the same sign (common in some OTF fonts),
+  // fall back to treating larger contours as outers
+  if (outers.length === 0 && holes.length > 0) {
+    // Find the largest contour and make it the outer
+    holes.sort((a, b) => Math.abs(signedAreaVec2(b)) - Math.abs(signedAreaVec2(a)));
+    outers.push(holes.shift()); // largest becomes outer
+  }
+
+  return outers.map(outerPts => {
+    const shape = new THREE.Shape(outerPts);
+    // Attach holes whose first point falls inside this outer
+    for (const holePts of holes) {
+      if (pointInPolygon(holePts[0], outerPts)) {
+        shape.holes.push(new THREE.Path(holePts));
+      }
+    }
+    return shape;
+  });
+}
+
+// Legacy SVG-path based converter — used for base/border offset path only
+function svgShapesToThreeShapes(svgPaths) {
+  const shapes = [];
+  for (const path of svgPaths) {
+    const pathShapes = path.toShapes(true);
+    for (const shape of pathShapes) {
+      const pts = shape.getPoints().map(p => new THREE.Vector2(p.x, -p.y));
+      const newShape = new THREE.Shape(pts);
+      for (const hole of shape.holes) {
+        const holePts = hole.getPoints().map(p => new THREE.Vector2(p.x, -p.y));
+        newShape.holes.push(new THREE.Path(holePts));
+      }
+      shapes.push(newShape);
+    }
+  }
+  return shapes;
+}
+
 function clipperPolysToShapes(polys) {
-  // Separate outers (positive area in screen space) from holes.
   const outers = [];
   const holes  = [];
   for (const poly of polys) {
     if (poly.length < 3) continue;
-    const area = signedArea(poly); // screen space (Y-down)
-    // negate Y for 3D space
+    const area = signedArea(poly);
     const pts3d = poly.map(([x, y]) => new THREE.Vector2(x, -y));
-    if (area > 0) outers.push(pts3d); // outer in screen = positive
+    if (area > 0) outers.push(pts3d);
     else           holes.push(pts3d);
   }
   return outers.map(outerPts => {
     const shape = new THREE.Shape(outerPts);
-    // Attach any hole whose first point is inside this outer (simple heuristic)
     for (const holePts of holes) {
       shape.holes.push(new THREE.Path(holePts));
     }
@@ -156,11 +264,8 @@ function makeTabGeo(tabR, holeR, h, segs = 48) {
   return new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: segs });
 }
 
-// ── 3MF writer (ZIP-packaged, slicer-compatible) ─────────────────────────────
-
-// Minimal pure-JS ZIP builder (PKZIP local file + central directory, no compression)
+// ── 3MF writer ────────────────────────────────────────────────────────────────
 function buildZip(files) {
-  // files: Array of { name: string, data: Uint8Array }
   const enc = new TextEncoder();
   const toU8 = s => (typeof s === "string" ? enc.encode(s) : s);
 
@@ -198,34 +303,30 @@ function buildZip(files) {
     const name = enc.encode(file.name);
     const data = toU8(file.data);
     const crc  = crc32(data);
-    const dosDate = 0x5765; // 2023-11-05 approx
+    const dosDate = 0x5765;
     const dosTime = 0x0000;
 
-    // Local file header
     const local = concat(
-      new Uint8Array([0x50,0x4B,0x03,0x04]), // signature
-      u16(20),        // version needed
-      u16(0),         // flags
-      u16(0),         // compression (stored)
-      u16(dosTime), u16(dosDate),
-      u32(crc),
-      u32(data.length), u32(data.length), // compressed = uncompressed
-      u16(name.length), u16(0),           // filename len, extra len
-      name, data
-    );
-
-    // Central directory header
-    const central = concat(
-      new Uint8Array([0x50,0x4B,0x01,0x02]), // signature
-      u16(20), u16(20),   // version made by, version needed
-      u16(0), u16(0),     // flags, compression
+      new Uint8Array([0x50,0x4B,0x03,0x04]),
+      u16(20), u16(0), u16(0),
       u16(dosTime), u16(dosDate),
       u32(crc),
       u32(data.length), u32(data.length),
-      u16(name.length), u16(0), u16(0), // filename, extra, comment lengths
-      u16(0), u16(0),     // disk number start, internal attrs
-      u32(0),             // external attrs
-      u32(offset),        // relative offset of local header
+      u16(name.length), u16(0),
+      name, data
+    );
+
+    const central = concat(
+      new Uint8Array([0x50,0x4B,0x01,0x02]),
+      u16(20), u16(20),
+      u16(0), u16(0),
+      u16(dosTime), u16(dosDate),
+      u32(crc),
+      u32(data.length), u32(data.length),
+      u16(name.length), u16(0), u16(0),
+      u16(0), u16(0),
+      u32(0),
+      u32(offset),
       name
     );
 
@@ -237,13 +338,12 @@ function buildZip(files) {
   const cdOffset = offset;
   const cdSize   = centralHeaders.reduce((s, h) => s + h.length, 0);
 
-  // End of central directory
   const eocd = concat(
-    new Uint8Array([0x50,0x4B,0x05,0x06]), // signature
-    u16(0), u16(0),                         // disk number, disk with CD
-    u16(files.length), u16(files.length),   // entries this disk, total entries
+    new Uint8Array([0x50,0x4B,0x05,0x06]),
+    u16(0), u16(0),
+    u16(files.length), u16(files.length),
     u32(cdSize), u32(cdOffset),
-    u16(0)                                   // comment length
+    u16(0)
   );
 
   return concat(...localHeaders, ...centralHeaders, eocd);
@@ -257,46 +357,35 @@ function build3MFZip(baseGeo, tabGeo, textGeo, borderHex, textHex) {
   const tbPos  = tbFlat.attributes.position;
   const txPos  = txFlat.attributes.position;
 
-  const norm = hex => "#" + hex.replace(/^#/, "").toUpperCase().padStart(6, "0");
+  const norm = hex => hex.replace(/^#/, "").toUpperCase().padStart(6, "0");
 
-  function buildMeshXML(posArr, count, colorIdx, indent) {
+  function meshXML(posArr, count) {
     const v = [], t = [];
     for (let i = 0; i < count; i++)
-      v.push(`${indent}  <vertex x="${posArr[i*3].toFixed(6)}" y="${posArr[i*3+1].toFixed(6)}" z="${posArr[i*3+2].toFixed(6)}" />`);
+      v.push(`          <vertex x="${posArr[i*3].toFixed(6)}" y="${posArr[i*3+1].toFixed(6)}" z="${posArr[i*3+2].toFixed(6)}" />`);
     for (let i = 0; i < count; i += 3)
-      t.push(`${indent}  <triangle v1="${i}" v2="${i+1}" v3="${i+2}" pid="1" p1="${colorIdx}" p2="${colorIdx}" p3="${colorIdx}" />`);
-    return `${indent}<vertices>\n${v.join("\n")}\n${indent}</vertices>\n${indent}<triangles>\n${t.join("\n")}\n${indent}</triangles>`;
+      t.push(`          <triangle v1="${i}" v2="${i+1}" v3="${i+2}" />`);
+    return `        <vertices>\n${v.join("\n")}\n        </vertices>\n        <triangles>\n${t.join("\n")}\n        </triangles>`;
   }
 
-  // Object 2 = base+tab mesh (color index 0 = border)
-  // Object 3 = text mesh    (color index 1 = text)
-  // Object 4 = assembly referencing both via <components> → shows as 1 obj, 2 parts in Bambu
-  // m:colorgroup face colors are read per-triangle on import (Bambu Studio v2.5+)
-  const baseMesh = buildMeshXML(
-    new Float32Array([...bPos.array, ...tbPos.array]),
-    bPos.count + tbPos.count, 0, "        "
-  );
-  const textMesh = buildMeshXML(txPos.array, txPos.count, 1, "        ");
+  const btArr = new Float32Array(bPos.count * 3 + tbPos.count * 3);
+  btArr.set(bPos.array, 0);
+  btArr.set(tbPos.array, bPos.count * 3);
 
+  const baseMesh = meshXML(btArr, bPos.count + tbPos.count);
+  const textMesh = meshXML(txPos.array, txPos.count);
   bFlat.dispose(); tbFlat.dispose(); txFlat.dispose();
 
   const modelXML = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US"
-  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-  xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
   <resources>
-    <m:colorgroup id="1">
-      <m:color color="${norm(borderHex)}" />
-      <m:color color="${norm(textHex)}" />
-    </m:colorgroup>
     <object id="2" name="base_tab" type="model">
-      <mesh>
-${baseMesh}
+      <mesh> ${baseMesh}
       </mesh>
     </object>
     <object id="3" name="text" type="model">
-      <mesh>
-${textMesh}
+      <mesh> ${textMesh}
       </mesh>
     </object>
     <object id="4" name="keychain" type="model">
@@ -311,10 +400,32 @@ ${textMesh}
   </build>
 </model>`;
 
+  const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="2">
+    <metadata key="extruder" value="1" />
+    <metadata key="name" value="base_tab" />
+  </object>
+  <object id="3">
+    <metadata key="extruder" value="2" />
+    <metadata key="name" value="text" />
+  </object>
+</config>`;
+
+  const plateSettings = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <plate>
+    <metadata key="plater_id" value="1" />
+    <filament id="1" color="#${norm(borderHex)}" type="PLA" />
+    <filament id="2" color="#${norm(textHex)}" type="PLA" />
+  </plate>
+</config>`;
+
   const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
+  <Default Extension="config" ContentType="application/xml" />
 </Types>`;
 
   const rels = `<?xml version="1.0" encoding="UTF-8"?>
@@ -323,13 +434,15 @@ ${textMesh}
 </Relationships>`;
 
   return buildZip([
-    { name: "[Content_Types].xml", data: contentTypes },
-    { name: "_rels/.rels",         data: rels },
-    { name: "3D/3dmodel.model",    data: modelXML },
+    { name: "[Content_Types].xml",            data: contentTypes },
+    { name: "_rels/.rels",                    data: rels },
+    { name: "3D/3dmodel.model",               data: modelXML },
+    { name: "Metadata/model_settings.config", data: modelSettings },
+    { name: "Metadata/plate_settings.config", data: plateSettings },
   ]);
 }
 
-// ── React helpers ────────────────────────────────────────────────────────────
+// ── React helpers ──────────────────────────────────────────────────────────────
 function useDebounce(v, d) {
   const [dv, setDv] = useState(v);
   useEffect(() => {
@@ -467,7 +580,7 @@ function ExportModal({ defaultName, format, onConfirm, onCancel, C }) {
   );
 }
 
-// ── App ──────────────────────────────────────────────────────────────────────
+// ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [darkMode, setDarkMode] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
   useEffect(() => {
@@ -478,23 +591,24 @@ export default function App() {
   }, []);
   const C = darkMode ? DARK : LIGHT;
 
-  const [name,         setName]         = useState(DEFAULTS.name);
-  const [font,         setFont]         = useState(DEFAULTS.font);
-  const [textCapHeight,setTextCapHeight]= useState(DEFAULTS.textCapHeight);
-  const [textHeight,   setTextHeight]   = useState(DEFAULTS.textHeight);
-  const [borderHeight, setBorderHeight] = useState(DEFAULTS.borderHeight);
-  const [borderOffset, setBorderOffset] = useState(DEFAULTS.borderOffset);
-  const [gap,          setGap]          = useState(DEFAULTS.gap);
-  const [tabDiameter,  setTabDiameter]  = useState(DEFAULTS.tabDiameter);
-  const [holeDiameter, setHoleDiameter] = useState(DEFAULTS.holeDiameter);
-  const [tabYOffset,   setTabYOffset]   = useState(DEFAULTS.tabYOffset);
-  const [borderColor,  setBorderColor]  = useState(DEFAULTS.borderColor);
-  const [textColor,    setTextColor]    = useState(DEFAULTS.textColor);
+  const [name,          setName]          = useState(DEFAULTS.name);
+  const [font,          setFont]          = useState(DEFAULTS.font);
+  const [textCapHeight, setTextCapHeight] = useState(DEFAULTS.textCapHeight);
+  const [textHeight,    setTextHeight]    = useState(DEFAULTS.textHeight);
+  const [borderHeight,  setBorderHeight]  = useState(DEFAULTS.borderHeight);
+  const [borderOffset,  setBorderOffset]  = useState(DEFAULTS.borderOffset);
+  const [gap,           setGap]           = useState(DEFAULTS.gap);
+  const [tabDiameter,   setTabDiameter]   = useState(DEFAULTS.tabDiameter);
+  const [holeDiameter,  setHoleDiameter]  = useState(DEFAULTS.holeDiameter);
+  const [tabYOffset,    setTabYOffset]    = useState(DEFAULTS.tabYOffset);
+  const [borderColor,   setBorderColor]   = useState(DEFAULTS.borderColor);
+  const [textColor,     setTextColor]     = useState(DEFAULTS.textColor);
   const colorsLoadedRef = useRef(false);
-  const [fontsReady, setFontsReady] = useState(false);
-  const [status,     setStatus]     = useState("loading");
-  const [exporting,  setExporting]  = useState(false);
-  const [exportModal,setExportModal]= useState(null);
+  const [fontsReady,  setFontsReady]  = useState(false);
+  const [loadedFonts, setLoadedFonts] = useState(new Set());
+  const [status,      setStatus]      = useState("loading");
+  const [exporting,   setExporting]   = useState(false);
+  const [exportModal, setExportModal] = useState(null);
 
   useEffect(() => {
     readSavedColors().then(s => {
@@ -505,15 +619,15 @@ export default function App() {
   }, []);
   useEffect(() => { if (colorsLoadedRef.current) persistColors(borderColor, textColor); }, [borderColor, textColor]);
 
-  const dName         = useDebounce(name,         200);
-  const dTextCapHeight= useDebounce(textCapHeight, 80);
-  const dTextHeight   = useDebounce(textHeight,    80);
-  const dBorderHeight = useDebounce(borderHeight,  80);
-  const dBorderOffset = useDebounce(borderOffset,  80);
-  const dGap          = useDebounce(gap,           80);
-  const dTabD         = useDebounce(tabDiameter,   80);
-  const dHoleD        = useDebounce(holeDiameter,  80);
-  const dTabY         = useDebounce(tabYOffset,    80);
+  const dName          = useDebounce(name,          200);
+  const dTextCapHeight = useDebounce(textCapHeight, 80);
+  const dTextHeight    = useDebounce(textHeight,    80);
+  const dBorderHeight  = useDebounce(borderHeight,  80);
+  const dBorderOffset  = useDebounce(borderOffset,  80);
+  const dGap           = useDebounce(gap,           80);
+  const dTabD          = useDebounce(tabDiameter,   80);
+  const dHoleD         = useDebounce(holeDiameter,  80);
+  const dTabY          = useDebounce(tabYOffset,    80);
 
   const safeName      = useMemo(() => dName.replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 20), [dName]);
   const suggestedName = `${safeName}_${font.split(":")[0]}`;
@@ -590,22 +704,50 @@ export default function App() {
     };
   }, []);
 
-  // Font loading
+  // ── Font loading — fault-tolerant, supports both TTF and OTF ──────────────
+  // opentype.js natively handles both TrueType (.ttf) and OpenType/CFF (.otf) fonts.
+  // Each font is loaded independently so a missing file won't block other fonts.
   useEffect(() => {
     let alive = true;
     (async () => {
-      try {
-        for (const k of Object.keys(FONT_URLS)) {
+      const loaded = new Set();
+      for (const k of Object.keys(FONT_URLS)) {
+        try {
           const r = await fetch(FONT_URLS[k]);
-          if (!r.ok) throw new Error("Font 404");
-          fontCacheRef.current[k] = opentype.parse(await r.arrayBuffer());
+          if (!r.ok) {
+            console.warn(`Font not found (${r.status}): ${FONT_URLS[k]}`);
+            continue;
+          }
+          const buf = await r.arrayBuffer();
+          // opentype.parse handles .ttf (TrueType) and .otf (CFF/CFF2) transparently
+          fontCacheRef.current[k] = opentype.parse(buf);
+          loaded.add(k);
           if (!alive) return;
+          // Update available fonts list progressively
+          setLoadedFonts(new Set(loaded));
+        } catch (e) {
+          console.warn(`Failed to load font "${k}" (${FONT_URLS[k]}):`, e);
         }
-        if (alive) { setFontsReady(true); setStatus("ready"); }
-      } catch (e) { console.error(e); setStatus("error"); }
+      }
+      if (!alive) return;
+      if (loaded.size > 0) {
+        setFontsReady(true);
+        setStatus("ready");
+      } else {
+        setStatus("error");
+      }
     })();
     return () => { alive = false; };
   }, []);
+
+  // If the selected font failed to load, auto-switch to the first available one
+  useEffect(() => {
+    if (loadedFonts.size > 0 && !loadedFonts.has(font)) {
+      const fallback = [...loadedFonts][0];
+      console.warn(`Font "${font}" unavailable, falling back to "${fallback}"`);
+      setFont(fallback);
+    }
+  }, [loadedFonts, font]);
 
   const clearGroup = useCallback(() => {
     const g = groupRef.current;
@@ -616,7 +758,7 @@ export default function App() {
     }
   }, []);
 
-  // ── Main geometry build ──────────────────────────────────────────────────
+  // ── Main geometry build ────────────────────────────────────────────────────
   useEffect(() => {
     if (!fontsReady || !safeName || !groupRef.current) return;
     const otFont = fontCacheRef.current[font];
@@ -626,9 +768,25 @@ export default function App() {
     const tid = setTimeout(() => {
       try {
         // ── Step 1: measure cap height to get correct font scale ──
-        const probePath  = otFont.getPath(safeName, 0, 0, dTextCapHeight).toPathData(2);
-        const probeData  = new SVGLoader().parse(`<svg><path d="${probePath}"/></svg>`);
-        const probeShapes = probeData.paths.flatMap(p => p.toShapes(true));
+        // Detect font type: opentype.js sets otFont.tables.cff for OTF/CFF fonts;
+        // TTF fonts have no cff table. Route to the correct shape builder accordingly.
+        // OTF/CFF: use direct path commands + area-based classification (winding unreliable).
+        // TTF: use SVGLoader + toShapes(true) which correctly handles TrueType winding.
+        const isCFF = !!(otFont.tables && otFont.tables.cff);
+        const buildTextShapes = (otPath) => {
+          if (isCFF) {
+            // OTF/CFF — bypass SVGLoader, classify contours by signed area
+            return opentypePathToThreeShapes(otPath);
+          } else {
+            // TTF — use SVGLoader which correctly honours TrueType winding convention
+            const svgStr = otPath.toPathData(4);
+            const parsed = new SVGLoader().parse(`<svg><path d="${svgStr}"/></svg>`);
+            return svgShapesToThreeShapes(parsed.paths);
+          }
+        };
+
+        const probeOtPath = otFont.getPath(safeName, 0, 0, dTextCapHeight);
+        const probeShapes = buildTextShapes(probeOtPath);
         let fontSize = dTextCapHeight;
         if (probeShapes.length) {
           const probeGeo = new THREE.ExtrudeGeometry(probeShapes, { depth: 1, bevelEnabled: false });
@@ -638,14 +796,11 @@ export default function App() {
           if (measuredH > 0) fontSize = dTextCapHeight * (dTextCapHeight / measuredH);
         }
 
-        // ── Step 2: get SVG path at calibrated font size ──
-        const svgPath = otFont.getPath(safeName, 0, 0, fontSize).toPathData(2);
-        const svgData = new SVGLoader().parse(`<svg><path d="${svgPath}"/></svg>`);
+        // ── Step 2: get opentype path at calibrated font size ──
+        const scaledOtPath = otFont.getPath(safeName, 0, 0, fontSize);
 
         // ── Step 3: build text geometry ──
-        // Key fix: negate Y in shape points BEFORE extrusion so winding stays correct.
-        // This avoids the scale(1,-1,1) hack that was breaking face normals.
-        const textShapes = svgShapesToThreeShapes(svgData.paths);
+        const textShapes = buildTextShapes(scaledOtPath);
         if (!textShapes.length) return;
 
         const textGeo = new THREE.ExtrudeGeometry(textShapes, {
@@ -656,7 +811,10 @@ export default function App() {
         textGeo.translate(-(tb.max.x + tb.min.x) / 2, -(tb.max.y + tb.min.y) / 2, 0);
 
         // ── Step 4: build base geometry ──
-        // Extract all sub-path contours from SVG (in screen/Y-down space)
+        // For border offset we still use SVGLoader to extract contour points for Clipper.
+        // Winding doesn't matter here — we only need the 2D outline shapes.
+        const svgPath = scaledOtPath.toPathData(4);
+        const svgData = new SVGLoader().parse(`<svg><path d="${svgPath}"/></svg>`);
         const rawContours = svgData.paths.flatMap(p =>
           p.subPaths.map(sp => sp.getPoints(48).map(pt => [pt.x, pt.y])).filter(c => c.length >= 3)
         );
@@ -678,7 +836,7 @@ export default function App() {
 
         // ── Step 6: add to scene ──
         clearGroup();
-        const baseMat = new THREE.MeshPhongMaterial({ color: borderColor, shininess: 80, side: THREE.DoubleSide });
+        const baseMat = new THREE.MeshPhongMaterial({ color: borderColor, shininess: 80,  side: THREE.DoubleSide });
         const textMat = new THREE.MeshPhongMaterial({ color: textColor,   shininess: 100, side: THREE.DoubleSide });
         const baseMesh = new THREE.Mesh(baseGeo, baseMat);
         const tabMesh  = new THREE.Mesh(tabGeo,  baseMat);
@@ -707,7 +865,7 @@ export default function App() {
     if (text) text.material.color.set(textColor);
   }, [borderColor, textColor]);
 
-  // ── STL export ───────────────────────────────────────────────────────────
+  // ── STL export ──────────────────────────────────────────────────────────────
   const doExportSTL = useCallback((filename) => {
     const { base, tab, text } = exportGeoRef.current;
     if (!base || !tab || !text) return;
@@ -721,7 +879,7 @@ export default function App() {
     merged.dispose(); tClone.dispose();
   }, [borderHeight]);
 
-  // ── 3MF export (ZIP-packaged) ────────────────────────────────────────────
+  // ── 3MF export ──────────────────────────────────────────────────────────────
   const doExport3MF = useCallback((filename) => {
     const { base, tab, text } = exportGeoRef.current;
     if (!base || !tab || !text) return;
@@ -798,12 +956,16 @@ export default function App() {
           <FieldLabel dirty={font !== DEFAULTS.font} onReset={() => setFont(DEFAULTS.font)} C={C}>Font</FieldLabel>
           <div style={{ position: "relative", marginBottom: 16 }}>
             <select value={font} onChange={e => setFont(e.target.value)} style={{ ...inp, cursor: "pointer", paddingRight: 32 }}>
-              <option value="Pacifico:style=Regular">Pacifico</option>
-              <option value="Lobster:style=Regular">Lobster</option>
-              <option value="Titan One:style=Regular">Titan One</option>
-              <option value="Luckiest Guy:style=Regular">Luckiest Guy</option>
-              <option value="Bhineka:style=Regular">Bhineka</option>
-              <option value="Pheonies:style=Regular">Pheonies</option>
+              {Object.keys(FONT_URLS).map(k => {
+                const label = k.split(":")[0];
+                const isOTF = FONT_URLS[k].endsWith(".otf");
+                const available = loadedFonts.has(k);
+                return (
+                  <option key={k} value={k} disabled={!available}>
+                    {label}{isOTF ? " (OTF)" : ""}{!available ? " – loading…" : ""}
+                  </option>
+                );
+              })}
             </select>
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", fontSize: 10, color: C.muted }}>▾</span>
           </div>
@@ -820,18 +982,18 @@ export default function App() {
           </div>
 
           <SectionHeader label="Text" C={C} />
-          <SliderRow label="Cap Height"    value={textCapHeight} min={8}   max={60} step={0.5} onChange={setTextCapHeight} defaultValue={DEFAULTS.textCapHeight} C={C} />
-          <SliderRow label="Depth"         value={textHeight}    min={0.5} max={10} step={0.5} onChange={setTextHeight}    defaultValue={DEFAULTS.textHeight}    C={C} />
+          <SliderRow label="Cap Height"     value={textCapHeight} min={8}   max={60} step={0.5} onChange={setTextCapHeight} defaultValue={DEFAULTS.textCapHeight} C={C} />
+          <SliderRow label="Depth"          value={textHeight}    min={0.5} max={10} step={0.5} onChange={setTextHeight}    defaultValue={DEFAULTS.textHeight}    C={C} />
 
           <SectionHeader label="Base" C={C} />
-          <SliderRow label="Height"        value={borderHeight}  min={0.5} max={8}  step={0.5} onChange={setBorderHeight}  defaultValue={DEFAULTS.borderHeight}  C={C} />
-          <SliderRow label="Border Padding"value={borderOffset}  min={0}   max={15} step={0.5} onChange={setBorderOffset}  defaultValue={DEFAULTS.borderOffset}  C={C} />
+          <SliderRow label="Height"         value={borderHeight}  min={0.5} max={8}  step={0.5} onChange={setBorderHeight}  defaultValue={DEFAULTS.borderHeight}  C={C} />
+          <SliderRow label="Border Padding" value={borderOffset}  min={0}   max={15} step={0.5} onChange={setBorderOffset}  defaultValue={DEFAULTS.borderOffset}  C={C} />
 
           <SectionHeader label="Hole Tab" C={C} />
-          <SliderRow label="Gap"           value={gap}           min={-5}  max={10} step={0.5} onChange={setGap}           defaultValue={DEFAULTS.gap}           C={C} />
-          <SliderRow label="Tab Diameter"  value={tabDiameter}   min={4}   max={20} step={0.5} onChange={setTabDiameter}   defaultValue={DEFAULTS.tabDiameter}   C={C} />
-          <SliderRow label="Hole Diameter" value={holeDiameter}  min={1}   max={10} step={0.5} onChange={setHoleDiameter}  defaultValue={DEFAULTS.holeDiameter}  C={C} />
-          <SliderRow label="Tab Y Offset"  value={tabYOffset}    min={-10} max={10} step={0.5} onChange={setTabYOffset}    defaultValue={DEFAULTS.tabYOffset}    C={C} />
+          <SliderRow label="Gap"            value={gap}           min={-5}  max={10} step={0.5} onChange={setGap}           defaultValue={DEFAULTS.gap}           C={C} />
+          <SliderRow label="Tab Diameter"   value={tabDiameter}   min={4}   max={20} step={0.5} onChange={setTabDiameter}   defaultValue={DEFAULTS.tabDiameter}   C={C} />
+          <SliderRow label="Hole Diameter"  value={holeDiameter}  min={1}   max={10} step={0.5} onChange={setHoleDiameter}  defaultValue={DEFAULTS.holeDiameter}  C={C} />
+          <SliderRow label="Tab Y Offset"   value={tabYOffset}    min={-10} max={10} step={0.5} onChange={setTabYOffset}    defaultValue={DEFAULTS.tabYOffset}    C={C} />
 
           <SectionHeader label="Colors" C={C} />
           <ColorRow label="Border Color" value={borderColor} defaultValue={DEFAULTS.borderColor} onChange={setBorderColor} C={C} />
