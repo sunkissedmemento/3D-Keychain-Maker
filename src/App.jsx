@@ -22,18 +22,18 @@ const DEFAULTS = {
 };
 
 const FONT_URLS = {
-  "Pacifico:style=Regular":    "/fonts/Pacifico-Regular.ttf",
-  "Lobster:style=Regular":     "/fonts/Lobster-Regular.ttf",
-  "Titan One:style=Regular":   "/fonts/TitanOne-Regular.ttf",
-  "Luckiest Guy:style=Regular":"/fonts/LuckiestGuy-Regular.ttf",
-  "Bhineka:style=Regular":     "/fonts/Bhineka-Regular.ttf",
-  "Pheonies:style=Regular":    "/fonts/Pheonies.otf",
-  // New fonts
-  "Freedom:style=Regular":     "/fonts/Freedom-10eM.ttf",
-  "Short Baby:style=Regular":  "/fonts/ShortBaby-Mg2w.ttf",
-  "Cabal Bold:style=Regular":  "/fonts/CabalBold-78yP.ttf",
-  "Pixel Letters:style=Regular":"/fonts/Pixellettersfull-BnJ5.ttf",
-  "Hearty Geelyn:style=Regular":"/fonts/HeartyGeelynEditsAirbrush-ze23.ttf",
+  "Pacifico:style=Regular":      "/fonts/Pacifico-Regular.ttf",
+  "Lobster:style=Regular":       "/fonts/Lobster-Regular.ttf",
+  "Titan One:style=Regular":     "/fonts/TitanOne-Regular.ttf",
+  "Luckiest Guy:style=Regular":  "/fonts/LuckiestGuy-Regular.ttf",
+  "Bhineka:style=Regular":       "/fonts/Bhineka-Regular.ttf",
+  "Pheonies:style=Regular":      "/fonts/Pheonies.otf",
+  "Freedom:style=Regular":       "/fonts/Freedom-10eM.ttf",
+  "Baby Plums:style=Regular":    "/fonts/BabyPlums-rv2gL.ttf",
+  "Short Baby:style=Regular":    "/fonts/ShortBaby-Mg2w.ttf",
+  "Cabal Bold:style=Regular":    "/fonts/CabalBold-78yP.ttf",
+  "Pixel Letters:style=Regular": "/fonts/Pixellettersfull-BnJ5.ttf",
+  "Hearty Geelyn:style=Regular": "/fonts/HeartyGeelynEditsAirbrush-ze23.ttf",
 };
 
 const STORAGE_KEY = "keychain_colors_v1";
@@ -88,8 +88,6 @@ function offsetUnion(paths, delta) {
 }
 
 // ── Geometry helpers ───────────────────────────────────────────────────────────
-
-// Signed area of a polygon defined by THREE.Vector2 array (positive = CCW in Y-up space)
 function signedAreaVec2(pts) {
   let a = 0;
   for (let i = 0; i < pts.length; i++) {
@@ -100,7 +98,6 @@ function signedAreaVec2(pts) {
   return a / 2;
 }
 
-// Signed area of raw [x,y] polygon (screen/clipper space, Y-down)
 function signedArea(poly) {
   let a = 0;
   for (let i = 0; i < poly.length; i++) {
@@ -111,7 +108,6 @@ function signedArea(poly) {
   return a / 2;
 }
 
-// Point-in-polygon test (ray casting) for THREE.Vector2 points
 function pointInPolygon(pt, poly) {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -124,9 +120,6 @@ function pointInPolygon(pt, poly) {
   return inside;
 }
 
-// Convert opentype.js path commands directly to THREE.Shape contours.
-// This bypasses SVGLoader.toShapes() which mishandles OTF/CFF winding.
-// Returns array of { pts: Vector2[], area: number } contours.
 function opentypePathToContours(otPath, yFlip = true) {
   const contours = [];
   let current = null;
@@ -139,7 +132,6 @@ function opentypePathToContours(otPath, yFlip = true) {
     } else if (cmd.type === "L") {
       current?.push(new THREE.Vector2(cmd.x, flip * cmd.y));
     } else if (cmd.type === "C") {
-      // Cubic bezier — sample it
       if (current) {
         const p0 = current[current.length - 1];
         const p1 = new THREE.Vector2(cmd.x1, flip * cmd.y1);
@@ -156,7 +148,6 @@ function opentypePathToContours(otPath, yFlip = true) {
         }
       }
     } else if (cmd.type === "Q") {
-      // Quadratic bezier — sample it
       if (current) {
         const p0 = current[current.length - 1];
         const p1 = new THREE.Vector2(cmd.x1, flip * cmd.y1);
@@ -182,33 +173,24 @@ function opentypePathToContours(otPath, yFlip = true) {
   return contours;
 }
 
-// Build THREE.Shape array from opentype.js path, correctly handling
-// OTF/CFF fonts where winding order cannot be trusted.
-// Strategy: classify contours by signed area (positive area in Y-up = CCW = outer),
-// then attach holes to their containing outer using point-in-polygon.
 function opentypePathToThreeShapes(otPath) {
-  const contours = opentypePathToContours(otPath, true); // Y-flipped for THREE
+  const contours = opentypePathToContours(otPath, true);
 
-  // Classify by signed area in Y-up 3D space
   const outers = [];
   const holes  = [];
   for (const pts of contours) {
     const area = signedAreaVec2(pts);
-    if (area > 0) outers.push(pts);  // CCW in Y-up = outer face
-    else          holes.push(pts);   // CW in Y-up = hole
+    if (area > 0) outers.push(pts);
+    else          holes.push(pts);
   }
 
-  // If all contours have the same sign (common in some OTF fonts),
-  // fall back to treating larger contours as outers
   if (outers.length === 0 && holes.length > 0) {
-    // Find the largest contour and make it the outer
     holes.sort((a, b) => Math.abs(signedAreaVec2(b)) - Math.abs(signedAreaVec2(a)));
-    outers.push(holes.shift()); // largest becomes outer
+    outers.push(holes.shift());
   }
 
   return outers.map(outerPts => {
     const shape = new THREE.Shape(outerPts);
-    // Attach holes whose first point falls inside this outer
     for (const holePts of holes) {
       if (pointInPolygon(holePts[0], outerPts)) {
         shape.holes.push(new THREE.Path(holePts));
@@ -218,7 +200,6 @@ function opentypePathToThreeShapes(otPath) {
   });
 }
 
-// Legacy SVG-path based converter — used for base/border offset path only
 function svgShapesToThreeShapes(svgPaths) {
   const shapes = [];
   for (const path of svgPaths) {
@@ -580,6 +561,59 @@ function ExportModal({ defaultName, format, onConfirm, onCancel, C }) {
   );
 }
 
+// ── Dimensions Card — slicer style ────────────────────────────────────────────
+function DimensionsCard({ dimensions, objectName, darkMode }) {
+  if (!dimensions) return null;
+
+  const bg      = darkMode ? "rgba(12,8,22,0.42)" : "rgba(255,255,255,0.30)";
+  const border  = darkMode ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.60)";
+  const divider = darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+  const fg      = darkMode ? "#f0eaf8" : "#1a1a1a";
+  const fgLabel = darkMode ? "rgba(200,185,220,0.70)" : "rgba(60,50,80,0.60)";
+  const sizeClr = "#4dabf7";
+  const mono    = "'DM Mono','Courier New',monospace";
+
+  // Filament length: volume / cross-section area of 1.75mm diameter filament
+  const filamentLengthMm = (parseFloat(dimensions.volume)*1.2) / (Math.PI * Math.pow(1.75/2, 2));
+  const filamentLengthM  = (filamentLengthMm / 1000).toFixed(2);
+
+  function Row({ label, value, color }) {
+    return (
+      <div style={{ display:"flex", alignItems:"baseline", gap:6, lineHeight:"1.7" }}>
+        <span style={{ fontSize:11.5, color:fgLabel, fontFamily:mono, whiteSpace:"nowrap", flexShrink:0, minWidth:118 }}>{label}</span>
+        <span style={{ fontSize:11.5, color:color||fg, fontFamily:mono }}>{value}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      position:"absolute", top:12, left:12, zIndex:10,
+      background:bg,
+      backdropFilter:"blur(10px)", WebkitBackdropFilter:"blur(10px)",
+      border:`1px solid ${border}`,
+      borderRadius:7,
+      padding:"8px 13px 9px 11px",
+      boxShadow: darkMode ? "0 3px 16px rgba(0,0,0,0.65)" : "0 2px 12px rgba(0,0,0,0.13)",
+      pointerEvents:"none",
+      minWidth:250,
+    }}>
+      {/* Object info */}
+      <Row label="Object name:" value={objectName} />
+      <Row label="Size:"        value={`${dimensions.w} x ${dimensions.h} x ${dimensions.d} mm`} color={sizeClr} />
+      <Row label="Volume:"      value={`${dimensions.volume} mm³`} />
+      <Row label="Triangles:"   value={dimensions.triangles.toLocaleString()} />
+
+      <div style={{ height:1, background:divider, margin:"5px 0 4px" }} />
+
+      {/* Print estimates */}
+      <Row label="Printing Time:"    value={dimensions.printTime} />
+      <Row label="Filament Weight:"  value={`${dimensions.weightG} g`} />
+      <Row label="Filament Length:"  value={`${filamentLengthM} m`} />
+    </div>
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [darkMode, setDarkMode] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
@@ -603,6 +637,7 @@ export default function App() {
   const [tabYOffset,    setTabYOffset]    = useState(DEFAULTS.tabYOffset);
   const [borderColor,   setBorderColor]   = useState(DEFAULTS.borderColor);
   const [textColor,     setTextColor]     = useState(DEFAULTS.textColor);
+  const [dimensions,    setDimensions]    = useState(null);
   const colorsLoadedRef = useRef(false);
   const [fontsReady,  setFontsReady]  = useState(false);
   const [loadedFonts, setLoadedFonts] = useState(new Set());
@@ -704,9 +739,7 @@ export default function App() {
     };
   }, []);
 
-  // ── Font loading — fault-tolerant, supports both TTF and OTF ──────────────
-  // opentype.js natively handles both TrueType (.ttf) and OpenType/CFF (.otf) fonts.
-  // Each font is loaded independently so a missing file won't block other fonts.
+  // Font loading
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -714,33 +747,23 @@ export default function App() {
       for (const k of Object.keys(FONT_URLS)) {
         try {
           const r = await fetch(FONT_URLS[k]);
-          if (!r.ok) {
-            console.warn(`Font not found (${r.status}): ${FONT_URLS[k]}`);
-            continue;
-          }
+          if (!r.ok) { console.warn(`Font not found (${r.status}): ${FONT_URLS[k]}`); continue; }
           const buf = await r.arrayBuffer();
-          // opentype.parse handles .ttf (TrueType) and .otf (CFF/CFF2) transparently
           fontCacheRef.current[k] = opentype.parse(buf);
           loaded.add(k);
           if (!alive) return;
-          // Update available fonts list progressively
           setLoadedFonts(new Set(loaded));
         } catch (e) {
           console.warn(`Failed to load font "${k}" (${FONT_URLS[k]}):`, e);
         }
       }
       if (!alive) return;
-      if (loaded.size > 0) {
-        setFontsReady(true);
-        setStatus("ready");
-      } else {
-        setStatus("error");
-      }
+      if (loaded.size > 0) { setFontsReady(true); setStatus("ready"); }
+      else { setStatus("error"); }
     })();
     return () => { alive = false; };
   }, []);
 
-  // If the selected font failed to load, auto-switch to the first available one
   useEffect(() => {
     if (loadedFonts.size > 0 && !loadedFonts.has(font)) {
       const fallback = [...loadedFonts][0];
@@ -767,22 +790,34 @@ export default function App() {
     clearGroup();
     const tid = setTimeout(() => {
       try {
-        // ── Step 1: measure cap height to get correct font scale ──
-        // Detect font type: opentype.js sets otFont.tables.cff for OTF/CFF fonts;
-        // TTF fonts have no cff table. Route to the correct shape builder accordingly.
-        // OTF/CFF: use direct path commands + area-based classification (winding unreliable).
-        // TTF: use SVGLoader + toShapes(true) which correctly handles TrueType winding.
         const isCFF = !!(otFont.tables && otFont.tables.cff);
-        const buildTextShapes = (otPath) => {
-          if (isCFF) {
-            // OTF/CFF — bypass SVGLoader, classify contours by signed area
-            return opentypePathToThreeShapes(otPath);
-          } else {
-            // TTF — use SVGLoader which correctly honours TrueType winding convention
-            const svgStr = otPath.toPathData(4);
-            const parsed = new SVGLoader().parse(`<svg><path d="${svgStr}"/></svg>`);
-            return svgShapesToThreeShapes(parsed.paths);
+
+        const ttfShapes = (otPath) => {
+          const svgStr = otPath.toPathData(4);
+          const parsed = new SVGLoader().parse(`<svg><path d="${svgStr}"/></svg>`);
+          return svgShapesToThreeShapes(parsed.paths);
+        };
+        const cffShapes = (otPath) => opentypePathToThreeShapes(otPath);
+
+        const shapesLookHollow = (shapes) => {
+          if (!shapes.length) return false;
+          let outerArea = 0, holeArea = 0;
+          for (const s of shapes) {
+            const pts = s.getPoints(8);
+            outerArea += Math.abs(signedAreaVec2(pts));
+            for (const h of s.holes) {
+              const hpts = h.getPoints(8);
+              holeArea += Math.abs(signedAreaVec2(hpts));
+            }
           }
+          return outerArea > 0 && (holeArea / outerArea) > 0.6;
+        };
+
+        const buildTextShapes = (otPath) => {
+          if (isCFF) return cffShapes(otPath);
+          const ttf = ttfShapes(otPath);
+          if (shapesLookHollow(ttf)) return cffShapes(otPath);
+          return ttf;
         };
 
         const probeOtPath = otFont.getPath(safeName, 0, 0, dTextCapHeight);
@@ -796,10 +831,7 @@ export default function App() {
           if (measuredH > 0) fontSize = dTextCapHeight * (dTextCapHeight / measuredH);
         }
 
-        // ── Step 2: get opentype path at calibrated font size ──
         const scaledOtPath = otFont.getPath(safeName, 0, 0, fontSize);
-
-        // ── Step 3: build text geometry ──
         const textShapes = buildTextShapes(scaledOtPath);
         if (!textShapes.length) return;
 
@@ -810,14 +842,32 @@ export default function App() {
         const tb = textGeo.boundingBox;
         textGeo.translate(-(tb.max.x + tb.min.x) / 2, -(tb.max.y + tb.min.y) / 2, 0);
 
-        // ── Step 4: build base geometry ──
-        // For border offset we still use SVGLoader to extract contour points for Clipper.
-        // Winding doesn't matter here — we only need the 2D outline shapes.
         const svgPath = scaledOtPath.toPathData(4);
         const svgData = new SVGLoader().parse(`<svg><path d="${svgPath}"/></svg>`);
         const rawContours = svgData.paths.flatMap(p =>
           p.subPaths.map(sp => sp.getPoints(48).map(pt => [pt.x, pt.y])).filter(c => c.length >= 3)
         );
+
+        {
+          let curX = 0;
+          for (let ci = 0; ci < safeName.length; ci++) {
+            const ch = safeName[ci];
+            const glyph = otFont.charToGlyph(ch);
+            const advance = (glyph.advanceWidth || 0) * (fontSize / otFont.unitsPerEm);
+            if (ch === " ") {
+              const x0 = curX, x1 = curX + advance;
+              const y0 = -fontSize * 0.1, y1 = fontSize * 0.1;
+              rawContours.push([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]);
+            }
+            curX += advance;
+            if (ci + 1 < safeName.length) {
+              const nextGlyph = otFont.charToGlyph(safeName[ci + 1]);
+              const kern = otFont.getKerningValue(glyph, nextGlyph);
+              curX += kern * (fontSize / otFont.unitsPerEm);
+            }
+          }
+        }
+
         const offsetPolys = offsetUnion(rawContours, dBorderOffset);
         const baseShapes  = clipperPolysToShapes(offsetPolys);
 
@@ -830,11 +880,9 @@ export default function App() {
         baseGeo.computeBoundingBox();
         const baseB = baseGeo.boundingBox;
 
-        // ── Step 5: tab ──
         const tabGeo = makeTabGeo(dTabD / 2, dHoleD / 2, dBorderHeight, 40);
         tabGeo.translate(baseB.min.x - dGap - dTabD / 2, dTabY, 0);
 
-        // ── Step 6: add to scene ──
         clearGroup();
         const baseMat = new THREE.MeshPhongMaterial({ color: borderColor, shininess: 80,  side: THREE.DoubleSide });
         const textMat = new THREE.MeshPhongMaterial({ color: textColor,   shininess: 100, side: THREE.DoubleSide });
@@ -844,6 +892,66 @@ export default function App() {
         textMesh.position.z = dBorderHeight;
         groupRef.current.add(baseMesh, tabMesh, textMesh);
         meshRef.current = { base: baseMesh, tab: tabMesh, text: textMesh };
+
+        // ── Compute print dimensions, volume, triangle count ─────────────────
+        const combined = new THREE.Box3();
+        combined.expandByObject(baseMesh);
+        combined.expandByObject(tabMesh);
+        const size = new THREE.Vector3();
+        combined.getSize(size);
+
+        // Signed-volume method for approximate mesh volume (mm³)
+        function meshVolume(geo) {
+          const pos = geo.attributes.position;
+          let vol = 0;
+          for (let i = 0; i < pos.count; i += 3) {
+            const ax = pos.getX(i),   ay = pos.getY(i),   az = pos.getZ(i);
+            const bx = pos.getX(i+1), by = pos.getY(i+1), bz = pos.getZ(i+1);
+            const cx = pos.getX(i+2), cy = pos.getY(i+2), cz = pos.getZ(i+2);
+            vol += (ax*(by*cz - bz*cy) + bx*(cy*az - cz*ay) + cx*(ay*bz - az*by)) / 6;
+          }
+          return Math.abs(vol);
+        }
+        const bFlat  = baseGeo.toNonIndexed();
+        const tbFlat = tabGeo.toNonIndexed();
+        const txFlat = textGeo.toNonIndexed();
+        const totalVol = meshVolume(bFlat) + meshVolume(tbFlat) + meshVolume(txFlat);
+        const totalTris = (bFlat.attributes.position.count + tbFlat.attributes.position.count + txFlat.attributes.position.count) / 3;
+        bFlat.dispose(); tbFlat.dispose(); txFlat.dispose();
+
+        // ── Material cost (2-color) ───────────────────────────────────────────
+        // Use bounding-box volume: X × Y × Z (mm³)
+        const bboxVol  = (size.x * size.y * (dBorderHeight + dTextHeight)*.40);
+        // Weight(g) = (bboxVol / 1000) × 1.24  [PLA density]
+        const weightG  = (bboxVol / 1000) * 1.24;
+        // 2-color waste factor 1.25 (purge + prime tower + transition)
+        const weightG2c = weightG * 1.25;
+
+        // ── Print time (2-color + startup) ───────────────────────────────────
+        // Base: meshVol / 240  (4 mm³/s standard)
+        // Color factor: × 1.5  (purge cycles + swap delay)
+        // Startup overhead: +4 min (heat / home / level / initial purge)
+        const printMins = ((totalVol*0.75) / 240) * 1.5 + 4;
+        const printH    = Math.floor(printMins / 60);
+        const printM    = Math.round(printMins % 60);
+        const printTimeStr = printH > 0 ? `${printH}h ${printM}m` : `${printM}m`;
+
+        // Reference times for sub-label (single-color rates, no startup)
+        const bambuMins    = totalVol / 300;
+        const creaMins     = totalVol / 180;
+        const fmtT = m => { const h = Math.floor(m/60), mn = Math.round(m%60); return h > 0 ? `${h}h ${mn}m` : `${mn}m`; };
+
+        setDimensions({
+          w: +size.x.toFixed(2),
+          h: +size.y.toFixed(2),
+          d: +(dBorderHeight + dTextHeight).toFixed(2),
+          volume: totalVol.toFixed(2),
+          triangles: Math.round(totalTris),
+          weightG: weightG2c.toFixed(2),
+          printTime: printTimeStr,
+          bambuTime: fmtT(bambuMins),
+          creaTime:  fmtT(creaMins),
+        });
 
         Object.values(exportGeoRef.current).forEach(g => g?.dispose());
         exportGeoRef.current = { base: baseGeo.clone(), tab: tabGeo.clone(), text: textGeo.clone() };
@@ -1043,7 +1151,12 @@ export default function App() {
               </button>
             </div>
           </div>
-          <div ref={canvasRef} style={{ flex: 1, minHeight: 0, overflow: "hidden" }} />
+
+          {/* Canvas + overlaid dimensions card */}
+          <div style={{ position: "relative", flex: 1, minHeight: 0, overflow: "hidden" }}>
+            <div ref={canvasRef} style={{ position: "absolute", inset: 0 }} />
+            <DimensionsCard dimensions={dimensions} objectName={safeName || "keychain"} darkMode={darkMode} />
+          </div>
         </div>
       </div>
 
