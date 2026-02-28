@@ -27,6 +27,7 @@ const FONT_URLS = {
   "Titan One:style=Regular": "/fonts/TitanOne-Regular.ttf",
   "Luckiest Guy:style=Regular": "/fonts/LuckiestGuy-Regular.ttf",
   "Bhineka:style=Regular": "/fonts/Bhineka-Regular.ttf",
+  "Pheonies:style=Regular": "/fonts/Pheonies.otf",
 };
 
 const STORAGE_KEY = "keychain_colors_v1";
@@ -67,9 +68,12 @@ const SCALE = 1000;
 const toCP = p => p.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
 const fromCP = p => p.map(v => [v.X / SCALE, v.Y / SCALE]);
 
-function shapeToOuterPaths(shape, q = 60) {
-  const pts = shape.getPoints(q);
-  return pts.length >= 3 ? [pts.map(p => [p.x, p.y])] : [];
+function shapePathToAllContours(shapePath, q = 60) {
+  // Extract every sub-path contour (outer + holes) as raw point arrays.
+  // For border offsetting we treat them all as filled regions and union them.
+  return shapePath.subPaths
+    .map(sp => sp.getPoints(q).map(p => [p.x, p.y]))
+    .filter(pts => pts.length >= 3);
 }
 
 function offsetUnion(paths, delta) {
@@ -438,7 +442,7 @@ export default function App() {
         const probePath = otFont.getPath(safeName, 0, 0, dTextCapHeight).toPathData(2);
         const probeData = new SVGLoader().parse(`<svg><path d="${probePath}"/></svg>`);
         const probeShapes = [];
-        probeData.paths.forEach(p => p.toShapes(true).forEach(s => probeShapes.push(s)));
+        probeData.paths.forEach(p => p.toShapes(false).forEach(s => probeShapes.push(s)));
         let fontSize = dTextCapHeight;
         if (probeShapes.length) {
           const probeGeo = new THREE.ExtrudeGeometry(probeShapes, { depth: 1, bevelEnabled: false });
@@ -450,15 +454,21 @@ export default function App() {
         const svgPath = otFont.getPath(safeName, 0, 0, fontSize).toPathData(2);
         const svgData = new SVGLoader().parse(`<svg><path d="${svgPath}"/></svg>`);
         const shapes = [];
-        svgData.paths.forEach(p => p.toShapes(true).forEach(s => shapes.push(s)));
+        svgData.paths.forEach(p => {
+          // false = use non-zero winding (correct for most fonts incl. OTF)
+          p.toShapes(false).forEach(s => shapes.push(s));
+        });
         if (!shapes.length) return;
         const textGeo = new THREE.ExtrudeGeometry(shapes, { depth: dTextHeight, bevelEnabled: false, curveSegments: 8 });
         textGeo.scale(1, -1, 1);
         textGeo.computeBoundingBox();
         const tb = textGeo.boundingBox;
         textGeo.translate(-(tb.max.x + tb.min.x) / 2, -(tb.max.y + tb.min.y) / 2, 0);
-        const outerPaths = shapes.flatMap(sh => shapeToOuterPaths(sh, 48));
-        const baseGeo = new THREE.ExtrudeGeometry(polysToShapes(offsetUnion(outerPaths, dBorderOffset)), { depth: dBorderHeight, bevelEnabled: false, curveSegments: 10 });
+        const rawContours = svgData.paths.flatMap(p => shapePathToAllContours(p, 48));
+        const baseGeo = new THREE.ExtrudeGeometry(
+          polysToShapes(offsetUnion(rawContours, dBorderOffset)),
+          { depth: dBorderHeight, bevelEnabled: false, curveSegments: 10 }
+        );
         baseGeo.scale(1, -1, 1);
         baseGeo.computeBoundingBox();
         const bb = baseGeo.boundingBox;
@@ -646,6 +656,7 @@ export default function App() {
               <option value="Titan One:style=Regular">Titan One</option>
               <option value="Luckiest Guy:style=Regular">Luckiest Guy</option>
               <option value="Bhineka:style=Regular">Bhineka</option>
+              <option value="Pheonies:style=Regular">Pheonies</option>
             </select>
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", fontSize: 10, color: C.muted }}>▾</span>
           </div>
