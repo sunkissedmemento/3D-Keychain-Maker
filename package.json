@@ -15,7 +15,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "three": "^0.182.0",
-    "three-bvh-csg": "^0.0.18"
+    "three-bvh-csg": "^0.0.18",
+    "threejs-exporter-pc": "^1.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
