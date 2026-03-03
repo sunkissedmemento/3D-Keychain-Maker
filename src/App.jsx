@@ -645,7 +645,7 @@ export default function App() {
   const [dimensions,    setDimensions]    = useState(null);
 
   // --- Linked text size controls (Width <-> Cap Height) ---
-  const [textWidth, setTextWidth] = useState(null); // measured mm from geometry
+  const [textWidth, setTextWidth] = useState(null);
   const measuredTextRef = useRef({ w: null, h: null });
   const textWidthDefaultRef = useRef(null);
   const clamp = (v, mn, mx) => Math.min(mx, Math.max(mn, v));
@@ -690,8 +690,6 @@ export default function App() {
     setBorderOffset(DEFAULTS.borderOffset); setGap(DEFAULTS.gap);
     setTabDiameter(DEFAULTS.tabDiameter); setHoleDiameter(DEFAULTS.holeDiameter);
     setTabYOffset(DEFAULTS.tabYOffset); setBorderColor(DEFAULTS.borderColor); setTextColor(DEFAULTS.textColor);
-
-    // reset linked width UI (will be re-measured on rebuild)
     setTextWidth(null);
     textWidthDefaultRef.current = null;
     measuredTextRef.current = { w: null, h: null };
@@ -837,16 +835,20 @@ export default function App() {
           return ttf;
         };
 
-        const probeOtPath = otFont.getPath(safeName, 0, 0, dTextCapHeight);
-        const probeShapes = buildTextShapes(probeOtPath);
+        // ── FIX: Calibrate font scale using "H" (flat capital, no ascender/descender)
+        // instead of safeName, so cap height is consistent regardless of string length
+        // or which characters appear in the name.
         let fontSize = dTextCapHeight;
-        if (probeShapes.length) {
-          const probeGeo = new THREE.ExtrudeGeometry(probeShapes, { depth: 1, bevelEnabled: false });
-          probeGeo.computeBoundingBox();
-          const measuredH = probeGeo.boundingBox.max.y - probeGeo.boundingBox.min.y;
-          probeGeo.dispose();
-          if (measuredH > 0) fontSize = dTextCapHeight * (dTextCapHeight / measuredH);
+        const refOtPath = otFont.getPath("H", 0, 0, dTextCapHeight);
+        const refShapes = buildTextShapes(refOtPath);
+        if (refShapes.length) {
+          const refGeo = new THREE.ExtrudeGeometry(refShapes, { depth: 1, bevelEnabled: false });
+          refGeo.computeBoundingBox();
+          const measuredCapH = refGeo.boundingBox.max.y - refGeo.boundingBox.min.y;
+          refGeo.dispose();
+          if (measuredCapH > 0) fontSize = dTextCapHeight * (dTextCapHeight / measuredCapH);
         }
+        // ── END FIX
 
         const scaledOtPath = otFont.getPath(safeName, 0, 0, fontSize);
         const textShapes = buildTextShapes(scaledOtPath);
@@ -1128,10 +1130,8 @@ export default function App() {
               unit="mm"
               onChange={(targetW) => {
                 setTextWidth(targetW);
-
                 const curW = measuredTextRef.current.w;
                 if (!curW || curW <= 0) return;
-
                 const scale = targetW / curW;
                 const nextCap = clamp(textCapHeight * scale, 8, 60);
                 setTextCapHeight(nextCap);
