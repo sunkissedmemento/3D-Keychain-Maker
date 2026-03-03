@@ -2,25 +2,32 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter";
-import { mergeGeometries, mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils";
 import opentype from "opentype.js";
 import ClipperLib from "clipper-lib";
 
 const DEFAULTS = {
   name: "Name",
   font: "Bhineka:style=Regular",
-  textCapHeight: 20,
+
+  // TEXT (from your screenshot)
+  textCapHeight: 14.5,
   textHeight: 3.0,
+
+  // BASE
   borderHeight: 2.0,
-  borderOffset: 3.0,
-  gap: 0,
+  borderOffset: 2.5,
+
+  // HOLE TAB
+  gap: -1.5,
   tabDiameter: 8.0,
-  holeDiameter: 4.0,
-  tabYOffset: 0.0,
+  holeDiameter: 3.5,
+  tabYOffset: 3.0,
+
+  // COLORS
   borderColor: "#f9a8d4",
   textColor: "#c084fc",
 };
-
 const FONT_URLS = {
   "Pacifico:style=Regular":      "/fonts/Pacifico-Regular.ttf",
   "Lobster:style=Regular":       "/fonts/Lobster-Regular.ttf",
@@ -598,7 +605,6 @@ function DimensionsCard({ dimensions, objectName, darkMode }) {
       pointerEvents:"none",
       minWidth:250,
     }}>
-      {/* Object info */}
       <Row label="Object name:" value={objectName} />
       <Row label="Size:"        value={`${dimensions.w} x ${dimensions.h} x ${dimensions.d} mm`} color={sizeClr} />
       <Row label="Volume:"      value={`${dimensions.volume} mm³`} />
@@ -606,7 +612,6 @@ function DimensionsCard({ dimensions, objectName, darkMode }) {
 
       <div style={{ height:1, background:divider, margin:"5px 0 4px" }} />
 
-      {/* Print estimates */}
       <Row label="Printing Time:"    value={dimensions.printTime} />
       <Row label="Filament Weight:"  value={`${dimensions.weightG} g`} />
       <Row label="Filament Length:"  value={`${filamentLengthM} m`} />
@@ -638,6 +643,13 @@ export default function App() {
   const [borderColor,   setBorderColor]   = useState(DEFAULTS.borderColor);
   const [textColor,     setTextColor]     = useState(DEFAULTS.textColor);
   const [dimensions,    setDimensions]    = useState(null);
+
+  // --- Linked text size controls (Width <-> Cap Height) ---
+  const [textWidth, setTextWidth] = useState(null); // measured mm from geometry
+  const measuredTextRef = useRef({ w: null, h: null });
+  const textWidthDefaultRef = useRef(null);
+  const clamp = (v, mn, mx) => Math.min(mx, Math.max(mn, v));
+
   const colorsLoadedRef = useRef(false);
   const [fontsReady,  setFontsReady]  = useState(false);
   const [loadedFonts, setLoadedFonts] = useState(new Set());
@@ -678,6 +690,11 @@ export default function App() {
     setBorderOffset(DEFAULTS.borderOffset); setGap(DEFAULTS.gap);
     setTabDiameter(DEFAULTS.tabDiameter); setHoleDiameter(DEFAULTS.holeDiameter);
     setTabYOffset(DEFAULTS.tabYOffset); setBorderColor(DEFAULTS.borderColor); setTextColor(DEFAULTS.textColor);
+
+    // reset linked width UI (will be re-measured on rebuild)
+    setTextWidth(null);
+    textWidthDefaultRef.current = null;
+    measuredTextRef.current = { w: null, h: null };
   }, []);
 
   const canvasRef    = useRef(null);
@@ -840,6 +857,16 @@ export default function App() {
         });
         textGeo.computeBoundingBox();
         const tb = textGeo.boundingBox;
+
+        // --- Measure text size (for linked Width slider) ---
+        const textW = tb.max.x - tb.min.x;
+        const textH = tb.max.y - tb.min.y;
+        measuredTextRef.current = { w: textW, h: textH };
+        setTextWidth(() => {
+          if (textWidthDefaultRef.current == null) textWidthDefaultRef.current = +textW.toFixed(2);
+          return +textW.toFixed(2);
+        });
+
         textGeo.translate(-(tb.max.x + tb.min.x) / 2, -(tb.max.y + tb.min.y) / 2, 0);
 
         const svgPath = scaledOtPath.toPathData(4);
@@ -900,7 +927,6 @@ export default function App() {
         const size = new THREE.Vector3();
         combined.getSize(size);
 
-        // Signed-volume method for approximate mesh volume (mm³)
         function meshVolume(geo) {
           const pos = geo.attributes.position;
           let vol = 0;
@@ -919,24 +945,15 @@ export default function App() {
         const totalTris = (bFlat.attributes.position.count + tbFlat.attributes.position.count + txFlat.attributes.position.count) / 3;
         bFlat.dispose(); tbFlat.dispose(); txFlat.dispose();
 
-        // ── Material cost (2-color) ───────────────────────────────────────────
-        // Use bounding-box volume: X × Y × Z (mm³)
         const bboxVol  = (size.x * size.y * (dBorderHeight + dTextHeight)*.40);
-        // Weight(g) = (bboxVol / 1000) × 1.24  [PLA density]
         const weightG  = (bboxVol / 1000) * 1.24;
-        // 2-color waste factor 1.25 (purge + prime tower + transition)
         const weightG2c = weightG * 1.25;
 
-        // ── Print time (2-color + startup) ───────────────────────────────────
-        // Base: meshVol / 240  (4 mm³/s standard)
-        // Color factor: × 1.5  (purge cycles + swap delay)
-        // Startup overhead: +4 min (heat / home / level / initial purge)
         const printMins = ((totalVol*0.75) / 240) * 1.5 + 4;
         const printH    = Math.floor(printMins / 60);
         const printM    = Math.round(printMins % 60);
         const printTimeStr = printH > 0 ? `${printH}h ${printM}m` : `${printM}m`;
 
-        // Reference times for sub-label (single-color rates, no startup)
         const bambuMins    = totalVol / 300;
         const creaMins     = totalVol / 180;
         const fmtT = m => { const h = Math.floor(m/60), mn = Math.round(m%60); return h > 0 ? `${h}h ${mn}m` : `${mn}m`; };
@@ -1052,7 +1069,6 @@ export default function App() {
       </div>
 
       <div style={{ position: "relative", zIndex: 1, display: "grid", gridTemplateColumns: "300px 1fr", flex: 1, minHeight: 0, overflow: "hidden" }}>
-
         {/* Controls */}
         <div style={{ background: C.surface, borderRight: `1px solid ${C.border}`, overflowY: "auto", overflowX: "hidden", padding: "16px 18px" }}>
           <FieldLabel dirty={name !== DEFAULTS.name} onReset={() => setName(DEFAULTS.name)} C={C}>Name</FieldLabel>
@@ -1090,7 +1106,41 @@ export default function App() {
           </div>
 
           <SectionHeader label="Text" C={C} />
-          <SliderRow label="Cap Height"     value={textCapHeight} min={8}   max={60} step={0.5} onChange={setTextCapHeight} defaultValue={DEFAULTS.textCapHeight} C={C} />
+          <SliderRow
+            label="Cap Height"
+            value={textCapHeight}
+            min={8}
+            max={60}
+            step={0.5}
+            onChange={(v) => setTextCapHeight(v)}
+            defaultValue={DEFAULTS.textCapHeight}
+            C={C}
+          />
+
+          {/* Linked width slider (updates cap height proportionally) */}
+          {textWidth != null && (
+            <SliderRow
+              label="Text Width"
+              value={textWidth}
+              min={20}
+              max={200}
+              step={0.5}
+              unit="mm"
+              onChange={(targetW) => {
+                setTextWidth(targetW);
+
+                const curW = measuredTextRef.current.w;
+                if (!curW || curW <= 0) return;
+
+                const scale = targetW / curW;
+                const nextCap = clamp(textCapHeight * scale, 8, 60);
+                setTextCapHeight(nextCap);
+              }}
+              defaultValue={textWidthDefaultRef.current ?? textWidth}
+              C={C}
+            />
+          )}
+
           <SliderRow label="Depth"          value={textHeight}    min={0.5} max={10} step={0.5} onChange={setTextHeight}    defaultValue={DEFAULTS.textHeight}    C={C} />
 
           <SectionHeader label="Base" C={C} />
@@ -1152,7 +1202,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Canvas + overlaid dimensions card */}
           <div style={{ position: "relative", flex: 1, minHeight: 0, overflow: "hidden" }}>
             <div ref={canvasRef} style={{ position: "absolute", inset: 0 }} />
             <DimensionsCard dimensions={dimensions} objectName={safeName || "keychain"} darkMode={darkMode} />
