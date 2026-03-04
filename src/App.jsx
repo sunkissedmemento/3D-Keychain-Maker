@@ -28,6 +28,12 @@ const DEFAULTS = {
   borderColor: "#f9a8d4",
   textColor: "#c084fc",
 };
+// Fonts that render better at a specific default cap height
+const FONT_CAP_HEIGHT_DEFAULTS = {
+  "Luckiest Guy:style=Regular": 10,
+  "Titan One:style=Regular":    10,
+};
+
 const FONT_URLS = {
   "Pacifico:style=Regular":      "/fonts/Pacifico-Regular.ttf",
   "Lobster:style=Regular":       "/fonts/Lobster-Regular.ttf",
@@ -787,6 +793,13 @@ export default function App() {
     }
   }, [loadedFonts, font]);
 
+  // Auto-apply font-specific cap height when font changes
+  useEffect(() => {
+    const override = FONT_CAP_HEIGHT_DEFAULTS[font];
+    if (override !== undefined) setTextCapHeight(override);
+    else setTextCapHeight(DEFAULTS.textCapHeight);
+  }, [font]);
+
   const clearGroup = useCallback(() => {
     const g = groupRef.current;
     if (!g) return;
@@ -835,20 +848,18 @@ export default function App() {
           return ttf;
         };
 
-        // ── FIX: Calibrate font scale using "H" (flat capital, no ascender/descender)
-        // instead of safeName, so cap height is consistent regardless of string length
-        // or which characters appear in the name.
-        let fontSize = dTextCapHeight;
-        const refOtPath = otFont.getPath("H", 0, 0, dTextCapHeight);
-        const refShapes = buildTextShapes(refOtPath);
-        if (refShapes.length) {
-          const refGeo = new THREE.ExtrudeGeometry(refShapes, { depth: 1, bevelEnabled: false });
-          refGeo.computeBoundingBox();
-          const measuredCapH = refGeo.boundingBox.max.y - refGeo.boundingBox.min.y;
-          refGeo.dispose();
-          if (measuredCapH > 0) fontSize = dTextCapHeight * (dTextCapHeight / measuredCapH);
-        }
-        // ── END FIX
+        // ── Calibrate font scale using OS/2 table metrics (most accurate).
+        // Priority: sCapHeight > sTypoAscender > unitsPerEm fallback.
+        // This avoids per-string bbox variance (ascenders, descenders, overshoots)
+        // that caused short names to render at the wrong size.
+        const unitsPerEm = otFont.unitsPerEm || 1000;
+        const os2 = otFont.tables?.os2;
+        const capHeightUnits =
+          (os2?.sCapHeight  > 0 ? os2.sCapHeight  : null) ??
+          (os2?.sTypoAscender > 0 ? os2.sTypoAscender : null) ??
+          unitsPerEm * 0.72; // reasonable fallback ~72% of em
+        // fontSize such that capHeightUnits maps to dTextCapHeight mm
+        const fontSize = dTextCapHeight * (unitsPerEm / capHeightUnits);
 
         const scaledOtPath = otFont.getPath(safeName, 0, 0, fontSize);
         const textShapes = buildTextShapes(scaledOtPath);
