@@ -35,11 +35,13 @@ app.use(express.json());
 // patch3mf — fix known bad params in Bambu-exported 3MF configs
 // ---------------------------------------------------------------------------
 const CONFIG_CLAMP = {
-  raft_first_layer_expansion: { min: 0,                  default: 0 },
-  solid_infill_filament:      { min: 1, max: 2147483647, default: 1 },
-  sparse_infill_filament:     { min: 1, max: 2147483647, default: 1 },
-  tree_support_wall_count:    { min: 0, max: 2,          default: 0 },
-  wall_filament:              { min: 1, max: 2147483647, default: 1 },
+  raft_first_layer_expansion:    { min: 0,  max: undefined,   default: 0  },
+  solid_infill_filament:         { min: 1,  max: 2147483647,  default: 1  },
+  sparse_infill_filament:        { min: 1,  max: 2147483647,  default: 1  },
+  tree_support_wall_count:       { min: 0,  max: 2,           default: 0  },
+  wall_filament:                 { min: 1,  max: 2147483647,  default: 1  },
+  retraction_distances_when_cut: { min: 10, max: 18,          default: 18 },
+  long_retractions_when_cut:     { min: 0,  max: 10,          default: 0  },
 };
 
 function patch3mf(inputPath) {
@@ -68,15 +70,35 @@ function patch3mf(inputPath) {
     }
 
     // Clamp out-of-range params
+    // Note: some params are stored as arrays e.g. retraction_distances_when_cut = [30]
+    // In that case we clamp each element and preserve the array type.
     for (const [key, rule] of Object.entries(CONFIG_CLAMP)) {
       if (!(key in cfg)) continue;
       const raw = cfg[key];
-      const n = parseFloat(raw);
-      if (isNaN(n)) continue;
-      if (n < rule.min || (rule.max !== undefined && n > rule.max)) {
-        cfg[key] = typeof raw === "string" ? String(rule.default) : rule.default;
-        console.log(`[patch3mf] clamped: ${key} = ${raw} -> ${cfg[key]}`);
-        modified = true;
+
+      if (Array.isArray(raw)) {
+        // Array type — clamp each element, preserve array
+        const clamped = raw.map(v => {
+          const n = parseFloat(v);
+          if (isNaN(n)) return v;
+          if (n < rule.min) return typeof v === "string" ? String(rule.min) : rule.min;
+          if (rule.max !== undefined && n > rule.max) return typeof v === "string" ? String(rule.max) : rule.max;
+          return v;
+        });
+        if (JSON.stringify(clamped) !== JSON.stringify(raw)) {
+          cfg[key] = clamped;
+          console.log(`[patch3mf] clamped array: ${key} = [${raw}] -> [${clamped}]`);
+          modified = true;
+        }
+      } else {
+        // Scalar type
+        const n = parseFloat(raw);
+        if (isNaN(n)) continue;
+        if (n < rule.min || (rule.max !== undefined && n > rule.max)) {
+          cfg[key] = typeof raw === "string" ? String(rule.default) : rule.default;
+          console.log(`[patch3mf] clamped: ${key} = ${raw} -> ${cfg[key]}`);
+          modified = true;
+        }
       }
     }
 
@@ -93,8 +115,6 @@ function patch3mf(inputPath) {
 
 // ---------------------------------------------------------------------------
 // 3MF → STL conversion
-// Extracts all mesh geometry from the 3MF and writes a clean ASCII STL.
-// This avoids all OrcaSlicer config validation errors from Bambu exports.
 // ---------------------------------------------------------------------------
 
 function parseXmlAttributes(attrText) {
@@ -140,55 +160,68 @@ function normalize(v) {
 
 function convert3mfToStl(inputPath) {
   const zip = new AdmZip(inputPath);
-  const modelEntry = zip.getEntry("3D/3dmodel.model");
-  if (!modelEntry) throw new Error("3MF has no 3D/3dmodel.model entry");
-
-  const xml = zip.readAsText(modelEntry);
   const objectMap = new Map();
-  const buildItems = [];
 
-  // Parse all <object> elements
-  const objRe = /<object\b([^>]*)>([\s\S]*?)<\/object>/gi;
-  let om;
-  while ((om = objRe.exec(xml)) !== null) {
-    const attrs = parseXmlAttributes(om[1]);
-    const body  = om[2];
-    const id    = attrs.id;
-    if (!id) continue;
+  // Parse objects from any XML string into objectMap
+  function parseObjectsFromXml(xml) {
+    const objRe = /<object\b([^>]*)>([\s\S]*?)<\/object>/gi;
+    let om;
+    while ((om = objRe.exec(xml)) !== null) {
+      const attrs = parseXmlAttributes(om[1]);
+      const body  = om[2];
+      const id    = attrs.id;
+      if (!id) continue;
 
-    const obj = { id, vertices: [], triangles: [], components: [] };
+      const obj = { id, vertices: [], triangles: [], components: [] };
 
-    const meshMatch = body.match(/<mesh\b[^>]*>([\s\S]*?)<\/mesh>/i);
-    if (meshMatch) {
-      const vRe = /<vertex\b([^\/>]*)\/>/gi; let vm;
-      while ((vm = vRe.exec(meshMatch[1])) !== null) {
-        const a = parseXmlAttributes(vm[1]);
-        obj.vertices.push([+a.x||0, +a.y||0, +a.z||0]);
+      const meshMatch = body.match(/<mesh\b[^>]*>([\s\S]*?)<\/mesh>/i);
+      if (meshMatch) {
+        const vRe = /<vertex\b([^\/>]*)\/>/gi; let vm;
+        while ((vm = vRe.exec(meshMatch[1])) !== null) {
+          const a = parseXmlAttributes(vm[1]);
+          obj.vertices.push([+a.x||0, +a.y||0, +a.z||0]);
+        }
+        const tRe = /<triangle\b([^\/>]*)\/>/gi; let tm;
+        while ((tm = tRe.exec(meshMatch[1])) !== null) {
+          const a = parseXmlAttributes(tm[1]);
+          obj.triangles.push([+a.v1||0, +a.v2||0, +a.v3||0]);
+        }
       }
-      const tRe = /<triangle\b([^\/>]*)\/>/gi; let tm;
-      while ((tm = tRe.exec(meshMatch[1])) !== null) {
-        const a = parseXmlAttributes(tm[1]);
-        obj.triangles.push([+a.v1||0, +a.v2||0, +a.v3||0]);
+
+      const compMatch = body.match(/<components\b[^>]*>([\s\S]*?)<\/components>/i);
+      if (compMatch) {
+        const cRe = /<component\b([^\/>]*)\/>/gi; let cm;
+        while ((cm = cRe.exec(compMatch[1])) !== null) {
+          const a = parseXmlAttributes(cm[1]);
+          if (a.objectid) obj.components.push({
+            objectid:  String(a.objectid),
+            transform: parseTransform(a.transform),
+          });
+        }
       }
+
+      objectMap.set(String(id), obj);
     }
-
-    const compMatch = body.match(/<components\b[^>]*>([\s\S]*?)<\/components>/i);
-    if (compMatch) {
-      const cRe = /<component\b([^\/>]*)\/>/gi; let cm;
-      while ((cm = cRe.exec(compMatch[1])) !== null) {
-        const a = parseXmlAttributes(cm[1]);
-        if (a.objectid) obj.components.push({
-          objectid:  String(a.objectid),
-          transform: parseTransform(a.transform),
-        });
-      }
-    }
-
-    objectMap.set(String(id), obj);
   }
 
-  // Parse <build> items
-  const buildMatch = xml.match(/<build\b[^>]*>([\s\S]*?)<\/build>/i);
+  // Load ALL .model files in the zip (handles external object references)
+  zip.getEntries().forEach(entry => {
+    if (!entry.isDirectory && entry.entryName.toLowerCase().endsWith(".model")) {
+      try { parseObjectsFromXml(zip.readAsText(entry)); } catch {}
+    }
+  });
+
+  console.log(`[convert] objectMap size=${objectMap.size} keys=[${[...objectMap.keys()].join(",")}]`);
+  if (objectMap.size === 0) throw new Error("3MF has no object entries in any .model file");
+
+  // Get build items from main model
+  const mainEntry = zip.getEntry("3D/3dmodel.model") ||
+    zip.getEntries().find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith(".model"));
+  if (!mainEntry) throw new Error("3MF has no 3D/3dmodel.model entry");
+
+  const mainXml = zip.readAsText(mainEntry);
+  const buildItems = [];
+  const buildMatch = mainXml.match(/<build\b[^>]*>([\s\S]*?)<\/build>/i);
   if (buildMatch) {
     const iRe = /<item\b([^\/>]*)\/>/gi; let im;
     while ((im = iRe.exec(buildMatch[1])) !== null) {
@@ -200,7 +233,6 @@ function convert3mfToStl(inputPath) {
     }
   }
 
-  // Fallback: use all mesh objects if no build section
   if (!buildItems.length) {
     for (const [id, obj] of objectMap)
       if (obj.triangles.length) buildItems.push({ objectid: id, transform: parseTransform(null) });
@@ -208,7 +240,6 @@ function convert3mfToStl(inputPath) {
 
   if (!buildItems.length) throw new Error("3MF has no build items or meshes");
 
-  // Flatten all objects into world-space triangles
   const allTris = [];
   const identity = parseTransform(null);
   const visited  = new Set();
@@ -239,7 +270,6 @@ function convert3mfToStl(inputPath) {
 
   if (!allTris.length) throw new Error("3MF geometry extraction produced zero triangles");
 
-  // Write ASCII STL
   const stlPath = inputPath.replace(/\.3mf$/i, "_converted.stl");
   const lines   = ["solid model"];
   for (const [a, b, c] of allTris) {
@@ -381,7 +411,7 @@ function calcPrice(sliceResult, cfg = PRICING) {
 }
 
 // ---------------------------------------------------------------------------
-// Slicer runner
+// Slicer runner — qualityProfile passed explicitly, no req dependency
 // ---------------------------------------------------------------------------
 
 function findGcode(dir) {
@@ -398,19 +428,16 @@ function findGcode(dir) {
   return null;
 }
 
-function runSlicer(inputPath) {
+// FIX: qualityProfile is now an explicit parameter instead of reading req.body
+function runSlicer(inputPath, qualityProfile = "0.20mm Standard @Creality K2 Plus 0.4 nozzle") {
   return new Promise((resolve, reject) => {
     const outDir = inputPath + "_out";
     if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-    // Find K2 machine + process profiles from OrcaSlicer
     const profileRoots = [
       "C:\\Program Files\\OrcaSlicer\\resources\\profiles\\Creality",
       path.join(os.homedir(), "AppData", "Roaming", "OrcaSlicer", "system", "Creality"),
     ];
-
-    // Pick process profile by quality setting sent from frontend
-    const qualityProfile = req.body.qualityProfile || "0.20mm Standard @Creality K2 Plus 0.4 nozzle";
 
     let machineProfile = null;
     let processProfile = null;
@@ -427,14 +454,12 @@ function runSlicer(inputPath) {
           if (f.isDirectory()) { walk(full); continue; }
           if (!f.name.endsWith(".json")) continue;
 
-          // Machine profile: k2 plus 0.4 nozzle in /machine/ folder
           if (dir.toLowerCase().includes("machine") &&
               lower.includes("k2") && lower.includes("0.4") &&
               !machineProfile) {
             machineProfile = full;
           }
 
-          // Process profile: match the exact profile name from frontend
           const nameWithoutExt = f.name.replace(/\.json$/i, "");
           if (dir.toLowerCase().includes("process") &&
               nameWithoutExt === qualityProfile &&
@@ -447,7 +472,7 @@ function runSlicer(inputPath) {
       if (machineProfile) break;
     }
 
-    // Fallback: if exact profile not found, use any standard 0.4 process profile
+    // Fallback: use any standard 0.20mm 0.4 process profile
     if (!processProfile) {
       for (const root of profileRoots) {
         if (!fs.existsSync(root)) continue;
@@ -540,47 +565,43 @@ app.post("/slice", upload.single("model"), async (req, res) => {
   let patchedPath  = null;
   let convertedStl = null;
   let outDir       = null;
+  let slicerInput  = null;
 
   try {
     if (!req.file) return res.status(400).json({ error: "No model file uploaded." });
 
     const ext = path.extname(req.file.originalname).toLowerCase();
-    if (![".stl", ".3mf", ".obj"].includes(ext))
-      return res.status(400).json({ error: "Only STL, 3MF, OBJ files accepted." });
+    if (ext !== ".3mf")
+      return res.status(400).json({ error: "Only .3mf files are accepted. Please export your model as a 3MF file from your slicer and re-upload." });
 
     renamedPath = uploadedPath + ext;
     fs.renameSync(uploadedPath, renamedPath);
 
-    console.log(`[slice] ${req.file.originalname} | printer=k2 | layer=${req.body.layerHeight || "0.2"} | infill=${req.body.infill || "15"}% | supports=${req.body.supports}`);
+    // FIX: extract qualityProfile from req here, in route scope, then pass down
+    const qualityProfile = req.body.qualityProfile || "0.20mm Standard @Creality K2 Plus 0.4 nozzle";
 
-    // Patch 3MF config params, then slice directly (preserves speed/quality settings)
-    // Falls back to STL conversion if patched 3MF still fails
-    let slicerInput = renamedPath;
-    if (ext === ".3mf") {
-      patchedPath = patch3mf(renamedPath);
-      slicerInput = patchedPath;
-    }
+    console.log(`[slice] ${req.file.originalname} | printer=k2 | layer=${req.body.layerHeight || "0.2"} | infill=${req.body.infill || "15"}% | supports=${req.body.supports} | quality=${qualityProfile}`);
+
+    slicerInput = renamedPath;
+    patchedPath = patch3mf(renamedPath);
+    slicerInput = patchedPath;
 
     let gcodeFile, od;
     try {
-      ({ gcodeFile, outDir: od } = await runSlicer(slicerInput));
+      ({ gcodeFile, outDir: od } = await runSlicer(slicerInput, qualityProfile));
     } catch (sliceErr) {
-      if (ext === ".3mf") {
-        console.warn("[slice] Patched 3MF failed, falling back to STL conversion:", sliceErr.message);
-        convertedStl = convert3mfToStl(renamedPath);
-        ({ gcodeFile, outDir: od } = await runSlicer(convertedStl));
-      } else {
-        throw sliceErr;
-      }
+      console.warn("[slice] Patched 3MF failed, falling back to STL conversion:", sliceErr.message);
+      convertedStl = convert3mfToStl(renamedPath);
+      ({ gcodeFile, outDir: od } = await runSlicer(convertedStl, qualityProfile));
     }
     outDir = od;
 
     const sliceResult = parseGcode(gcodeFile);
     const price       = calcPrice(sliceResult);
 
-    // Cleanup temp files
     try { fs.unlinkSync(renamedPath);   } catch {}
-    try { if (convertedStl) fs.unlinkSync(convertedStl); } catch {}
+    try { if (patchedPath)   fs.unlinkSync(patchedPath);   } catch {}
+    try { if (convertedStl)  fs.unlinkSync(convertedStl);  } catch {}
     try { fs.rmSync(outDir, { recursive: true }); } catch {}
 
     if (!sliceResult.weightG) {
@@ -601,10 +622,11 @@ app.post("/slice", upload.single("model"), async (req, res) => {
 
   } catch (err) {
     console.error("[slice] fatal:", err.message);
-    try { if (uploadedPath   && fs.existsSync(uploadedPath))   fs.unlinkSync(uploadedPath);   } catch {}
-    try { if (renamedPath    && fs.existsSync(renamedPath))    fs.unlinkSync(renamedPath);    } catch {}
-    try { if (convertedStl   && fs.existsSync(convertedStl))   fs.unlinkSync(convertedStl);   } catch {}
-    try { const ov = slicerInput + "_override.ini"; if (fs.existsSync(ov)) fs.unlinkSync(ov); } catch {}
+    try { if (uploadedPath  && fs.existsSync(uploadedPath))  fs.unlinkSync(uploadedPath);  } catch {}
+    try { if (renamedPath   && fs.existsSync(renamedPath))   fs.unlinkSync(renamedPath);   } catch {}
+    try { if (patchedPath   && fs.existsSync(patchedPath))   fs.unlinkSync(patchedPath);   } catch {}
+    try { if (convertedStl  && fs.existsSync(convertedStl))  fs.unlinkSync(convertedStl);  } catch {}
+    try { if (slicerInput) { const ov = slicerInput + "_override.ini"; if (fs.existsSync(ov)) fs.unlinkSync(ov); } } catch {}
     try { if (outDir) fs.rmSync(outDir, { recursive: true }); } catch {}
     res.status(500).json({ error: err.message });
   }
